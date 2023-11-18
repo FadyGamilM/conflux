@@ -2,35 +2,46 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
-	"log"
 	"strconv"
 	"strings"
 
 	"github.com/FadyGamilM/conflux/client"
+	"github.com/FadyGamilM/conflux/ports"
+	"github.com/FadyGamilM/conflux/server"
+	"github.com/FadyGamilM/conflux/web"
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	confluxClient := client.NewConfluxClient([]string{"localhost:8080"})
-	expected, err := send(confluxClient)
-	if err != nil {
-		log.Fatalf("error sending data to conflux : %v\n", err)
-	}
-	log.Printf("expected ➜ %v\n", expected)
+	// confluxClient := client.NewConfluxClient([]string{"localhost:8080"})
+	confluxServer := server.NewConfluxInMemApi()
+	// =======> INTEGRATION TEST #1
+	// expected, err := send(confluxServer)
+	// if err != nil {
+	// 	log.Fatalf("error sending data to conflux : %v\n", err)
+	// }
+	// log.Printf("expected ➜ %v\n", expected)
 
-	actual, err := receive(confluxClient)
-	if err != nil {
-		log.Fatalf("error receiving data from conflux : %v\n", err)
-	}
-	log.Printf("actual ➜ %v\n", actual)
+	// actual, err := receive(confluxServer)
+	// if err != nil {
+	// 	log.Fatalf("error receiving data from conflux : %v\n", err)
+	// }
+	// log.Printf("actual ➜ %v\n", actual)
 
+	webApi := web.NewServer(gin.Default(), confluxServer)
+	webApi.SetupEndpoints()
+	ctx := context.Background()
+	webApi.Run(ctx, "localhost", "9090")
+	<-ctx.Done()
 }
 
 var numberOfValuesToProduce = int64(10000000) // number of values we will send
 var maxChunkSize = 64 * client.KB             // max chunk size = 1 MB = 1024 KB  ==> i will make it 64 KB for now
 
-func receive(s *client.ConfluxClientApi) (sum int64, err error) {
+func receive(s ports.ConfluxInMemApi) (sum int64, err error) {
 	// define a 1MB bufer to receive data on by sending it into the Consume method
 	buf := make([]byte, maxChunkSize)
 	// infinite loop
@@ -73,7 +84,7 @@ func receive(s *client.ConfluxClientApi) (sum int64, err error) {
     method which accepts a slice of bytes, then we reset the buffer to start with new one in the next iteration
     2.1.5. if we didn't reach it we go to the next iteration..
 */
-func send(s *client.ConfluxClientApi) (sum int64, err error) {
+func send(s ports.ConfluxInMemApi) (sum int64, err error) {
 	var b bytes.Buffer
 	for i := 0; i <= int(numberOfValuesToProduce); i++ {
 		sum += int64(i)
