@@ -1,4 +1,4 @@
-package client
+package server
 
 import (
 	"bytes"
@@ -10,29 +10,23 @@ const KB = 1024
 
 const defaultChunkSize = 512 * KB // 64 KB
 
-type ConfluxClientApi struct {
-	addrs []string
+// this is the backend conflux structure [class]
+type confluxInMemApi struct {
+	// buf is the main in-mem storage for storing data
 	// buf is intially a buffer of size = 0
 	buf bytes.Buffer
-	// restBuf is the rest of data that is read in the previous Consume operation but is not in a complete format to be returned so we waited fro the next Consume
-	// if we read 101\n102\n103 and we read only 6 bytes => so in the current consume we read "101\n10" but we will return "101\n" and restBuf is "10" in the next consume we will read "2\n103" and we will need to append the restBuf before "2\n103" to have 102\n103
+
+	// restBuf is the rest of data that is read in the previous Consume operation but is not in a complete format to be returned so we waited for the next Consume
+	// if we read 101\n102\n103 and we read only 6 bytes per chunk => so in the current consume we read "101\n10" but we will return "101\n" to be able to process the data correctly, and restBuf is "10" in the next consume we will read "2\n103" and we will need to append the restBuf before "2\n103" to have "102\n103" to be able to process it
 	restBuf bytes.Buffer
 }
 
-// factory method to create new conflux client api
-func NewConfluxClient(addresses []string) *ConfluxClientApi {
-	return &ConfluxClientApi{
-		addrs: addresses,
-	}
+func NewConfluxInMemApi() *confluxInMemApi {
+	return &confluxInMemApi{}
 }
 
-// add new data to the buffer storage of the conflux
-/*
- - receives : a slice of bytes [with chunk-size]
- - returns : error
-*/
-func (c *ConfluxClientApi) Produce(d []byte) error {
-	_, err := c.buf.Write(d)
+func (cmem *confluxInMemApi) Produce(data []byte) error {
+	_, err := cmem.buf.Write(data)
 	if err != nil {
 		log.Printf("error trying to send data to conflux buffer : %v\n", err)
 		return err
@@ -42,28 +36,31 @@ func (c *ConfluxClientApi) Produce(d []byte) error {
 	return nil
 }
 
-// consumes batches from the buffer storage
-func (c *ConfluxClientApi) Consume(data []byte) ([]byte, error) {
-	if data == nil {
-		data = make([]byte, defaultChunkSize)
+func (cmem *confluxInMemApi) Consume(storage []byte) (result []byte, err error) {
+	// if whoever the client using this api doesn't send any storage to save his data into, i will define a storage with the defaultChunkSize = 512 MB
+	if storage == nil {
+		storage = make([]byte, defaultChunkSize)
 	}
 
+	// to handle if we have any data from the previous Consume in the restBuf
 	offset := int(0)
 
 	// check the restBuf from the previous consume operation
-	if c.restBuf.Len() > 0 {
+	if cmem.restBuf.Len() > 0 {
 		// check that the restBuf can fit within the data passed by the client so we avoid nil reference errors
-		if c.restBuf.Len() > len(data) {
+		if cmem.restBuf.Len() > len(storage) {
 			return nil, errors.New("length of buffer is larger than length of given slice to read the buffer on")
 		}
 
-		// read it into a temp slice of bytes to append it later to the newely consumed portion before start processing the newely created portion
-		numberOfBytesFromPrevConsume, err := c.restBuf.Read(data)
+		// read the rest of the data stored in the restBuf into the storage data
+		// and then i will read the newely data offseted by the offset which is = numberOfButesFromPrevConsume
+		numberOfBytesFromPrevConsume, err := cmem.restBuf.Read(storage)
 		if err != nil {
 			return nil, err
 		}
-		// reset the rest buf
-		c.restBuf.Reset()
+
+		// reset the rest buf so we can add data into it if we faced the same problem in the newely read data
+		cmem.restBuf.Reset()
 
 		// set the offset to read the next portion into the data starting from it
 		offset += numberOfBytesFromPrevConsume
@@ -71,35 +68,35 @@ func (c *ConfluxClientApi) Consume(data []byte) ([]byte, error) {
 
 	// read the newely portion after reading the prev reminder portion
 	// bytes.Buffer.Read(buf) => reads from the bytes.Buffer() a data with length = the length of the buf passed variable
-	numberOfReadBytes, err := c.buf.Read(data[offset:])
+	numberOfReadBytes, err := cmem.buf.Read(storage[offset:])
 	if err != nil {
 		return nil, err
 	}
 
 	// log.Printf("number of Read bytes from the conflux buffer is = %v\n", numberOfReadBytes)
 	// log.Printf("Read bytes from the passed buffer is = %v\n", string(buf[0:numberOfReadBytes]))
-	chunkOfData := data[0 : numberOfReadBytes+offset]
+	chunkOfData := storage[0 : numberOfReadBytes+offset]
 
 	// we are consuming by reading from the original buffer storage with the length of the given chunk size (passed buffer)
 	// but what if we have this case :
 	// buffer = "100\n200\n" and the chunk-size is 6 bytes
 	// so we will read in the first line this : "100\n2" and the next line will be "00\n" which will be a bad result so we need to return each time the data within the chunk size but also with \n at the end so we need to search for the last \n before returning the result
-	if numberOfReadBytes == 0 {
-		// its okay return the result
-		return data[0:numberOfReadBytes], nil
-	}
+	// // if numberOfReadBytes == 0 {
+	// // 	// its okay return the result
+	// // 	return chunkOfData, nil // if we read zero bytes in the newely data, we shouldn't pass this to the ProcessConsumeData() method because we will face a nil dereference error because we will try to access chunkOfData[0-1] !!
+	// // }
 
 	toLastNewLine, restOfData, err := ProcessConsumedData(chunkOfData, numberOfReadBytes+offset)
 	if err != nil {
 		return nil, err
 	}
-	// reset the restBuf
-	c.restBuf.Reset()
+	// // // reset the restBuf
+	// // cmem.restBuf.Reset() // already reseted
 
 	// and write to it the protion of data that is read partially ("10" and next consume will give us "2\n103")
 	if restOfData != nil {
 		// then reset it
-		c.restBuf.Write(restOfData)
+		cmem.restBuf.Write(restOfData)
 	}
 	return toLastNewLine, nil
 }
